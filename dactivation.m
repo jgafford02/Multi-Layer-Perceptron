@@ -19,20 +19,13 @@ switch activation_function
         out = 1./(1+exp(-X));
         dY = out.*(1-out);
     case 'relu'
-        X(X>0)=1;
-        X(X<=0)=0;
-        dY = X;
+        dY = X>0;
+    case 'leakyrelu'
+        alpha = 0.01;
+        dY = alpha.*(X<0)+(X>0);
     case 'softmax'
         P = activation(X,'softmax');
-        for i = 1:length(X)
-            for j = 1:length(P)
-                if i==j
-                    dY(i)=P(i)*(1-P(i));
-                else
-                    dY(i) = P(i)*P(j);
-                end
-            end
-        end
+        dY = P.*(1-P);
         
 end    
 end

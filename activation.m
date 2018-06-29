@@ -20,6 +20,9 @@ switch activation_function
         Y = 1./(1+exp(-X));
     case 'relu'
         Y = max(zeros(size(X)),X);
+    case 'leakyrelu'
+        alpha = 0.01;
+        Y = alpha.*(X<0).*X+(X>0).*X;
     case 'softmax'
         Y = exp(X)./repmat(sum(exp(X),2),1,size(X,2));
 end   
