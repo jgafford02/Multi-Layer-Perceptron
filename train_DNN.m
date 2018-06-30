@@ -12,7 +12,7 @@ function [w] = train_DNN(dataset,data,varargin)
 %           {'annealing', [string]}: rate annealing (possible options:
 %               {'none','step','exponential','1/t'}
 %           {'activation', [string]}: activation function (possible options:
-%               {'tanh','logistic','relu','1/t'}
+%               {'tanh','logistic','relu','leakyrelu','softmax'}
 %           {'momentum', [string]}: momentum (possible options:
 %               {'none','regular','nesterov','adam'}
 %           {'regularization', [string]}: regularization (possible options:
@@ -36,6 +36,8 @@ defaultNodes = 5;
 defaultLayers = 5;
 defaultRate = 0.005;
 defaultMiniBatch = 16;
+defaultMaxEpoch = 20;    % Maximum number of iterations
+defaultTargetAccuracy = 90;
 
 % Parse inputs
 p = inputParser;
@@ -51,15 +53,19 @@ addOptional(p, 'minibatch', defaultMiniBatch, ...
 addOptional(p, 'annealing', 'none', ...
     @(s) any(validatestring(s, {'none','step','exponential','1/t'})));
 addOptional(p, 'activation', 'tanh', ...
-    @(s) any(validatestring(s,{'tanh','logistic','relu','softmax'})));
-addOptional(p, 'outputactivation', 'logistic', ...
-    @(s) any(validatestring(s,{'tanh','logistic','relu','softmax'})));
+    @(s) any(validatestring(s,{'tanh','logistic','relu','leakyrelu','softmax'})));
+addOptional(p, 'outputactivation', 'softmax', ...
+    @(s) any(validatestring(s,{'tanh','logistic','relu','leakyrelu','softmax'})));
 addOptional(p, 'momentum', 'none', ...
     @(s) any(validatestring(s, {'none','regular','nesterov','adam'})));
 addOptional(p, 'regularization', 'none', ...
     @(s) any(validatestring(s, {'none','L1','L2','dropout'})));
 addOptional(p, 'plotgraphs', true,...
     @(x) isboolean(x));
+addOptional(p, 'maxEpochs', defaultMaxEpoch,...
+    @(x) isnumeric(x) && isscalar(x) && (x>0));
+addOptional(p, 'targetAccuracy', defaultTargetAccuracy,...
+    @(x) isnumeric(x) && isscalar(x) && (x>0) && (x<=100));
 
 parse(p,dataset,data,varargin{:});
            
@@ -74,6 +80,8 @@ output_activation_function = p.Results.outputactivation;
 momentum = p.Results.momentum;
 regularization = p.Results.regularization;
 plot_graphs = p.Results.plotgraphs;
+max_epoch = p.Results.maxEpochs;
+target_accuracy = p.Results.targetAccuracy;
 
 activations = {};
 for i=1:n_L-1
@@ -133,11 +141,9 @@ fprintf('Activation Function: %s\n',activation_function);
 
 
 n_data = data.training_count;   % Number of samples in training set
-
-max_iter = 10000;    % Maximum number of iterations
 acc = 0;                    % pre-allocate training accuracy
-target_accuracy = 98.0;     % Target training accuracy
-max_epoch = (max_iter*n_batch)/n_data;  % maximum epochs
+max_batch_idx = floor(n_data/n_batch);
+max_num_batches = max_batch_idx.*max_epoch;
 
 % Vector containing size of each layer
 L = [size(data.training.input,2);n_n.*ones(n_h,1);...
@@ -165,7 +171,7 @@ end
 net{end} = ones(L(end),1);
 
 % Pre-allocate for epoch and error vectors (for max iteration)
-epoch = zeros(1,max_iter-1);
+epoch = zeros(1,max_num_batches-1);
 error_train = epoch;    
 c_train = epoch;
 error_test = epoch;     
@@ -179,13 +185,26 @@ a_val = epoch;
 % Initialize iterator and timer
 tic;
 iter = 1;
-while ((iter<max_iter)&&(acc<target_accuracy))
+
+batch_idx = 1;
+epoch_idx = 1;
+loss = 0;
+while ((epoch(batch_idx)<max_epoch)&&(acc<target_accuracy))
     
     % Compute current epoch
-    epoch(iter) = iter*n_batch/n_data;
+    epoch(batch_idx+1) = batch_idx*n_batch/n_data;
     
-    % Randomly sample minibatch
-    samp = randsample(size(data.training.input,1),n_batch);
+    % Randomly sample data and create sequential minibatch
+    rand_ind = randsample(size(data.training.input,1),1);
+    if(rand_ind-n_batch<1)
+        samp = 1:1:n_batch;
+    elseif ((rand_ind+n_batch)>n_data)
+        samp = n_data:-1:(n_data-n_batch+1);
+    else
+        samp = rand_ind:1:(rand_ind+n_batch-1);
+    end
+
+    % Index into input and output data for minibatch
     X = data.training.input(samp,:);    % Sample input layer
     X = horzcat(X, ones(n_batch,1));    % Append 1's to act as bias to input
     Y = data.training.output(samp,:);   % Sample Output layer
@@ -204,6 +223,8 @@ while ((iter<max_iter)&&(acc<target_accuracy))
     end
     
     % Compute error vector
+    batch_loss = 0.5*(sum(sum(Y-a{end},1))).^2;
+    loss = loss + batch_loss;
     error_vector = (Y - a{end});
     
     % activation gradients and deltas for each layer
@@ -225,37 +246,46 @@ while ((iter<max_iter)&&(acc<target_accuracy))
         end
     end
     
-    if plot_graphs
-        % Compute error and classification error
-        [error_train(iter),c_train(iter),output_train] = ...
+    % Only compute error/classification metrics after each epoch
+    if ~(mod(batch_idx,max_batch_idx))
+        % Compute average loss for epoch
+        ave_loss = loss/max_batch_idx;
+        loss = 0;
+        
+        % Compute RMSE and classification accuracy for training, testing
+        % and validation sets
+        [error_train(epoch_idx),c_train(epoch_idx),output_train] = ...
             network_error(data.training,w,L,activations);
-        [error_test(iter),c_test(iter),output_test] = ...
+        [error_test(epoch_idx),c_test(epoch_idx),output_test] = ...
             network_error(data.test,w,L,activations);
-        [error_validation(iter),c_validation(iter),output_validation] = ...
+        [error_validation(epoch_idx),c_validation(epoch_idx),output_validation] = ...
             network_error(data.validation,w,L,activations);
-        [a_train(iter),a_test(iter),a_val(iter)] = ...
+        [a_train(epoch_idx),a_test(epoch_idx),a_val(epoch_idx)] = ...
             accuracy(data,output_train,output_test,output_validation);
+        
+        % Print some results
+        fprintf('\n-----------End of Epoch %i------------\n', epoch_idx);
+        fprintf('Test Set Accuracy: %f Average Loss: %f ',a_test(epoch_idx),ave_loss);
+        fprintf('\n-----------Start of Epoch %i------------\n' ,epoch_idx+1);
+        epoch_idx = epoch_idx+1;    % Update epoch index
     end
-    % Compute error and increment epoch
-    error = error_train(iter);
-    acc = a_train(iter);
-    fprintf('Epoch: %f of %f | Training RMSE: %f | Training Accuracy: %f \n',...
-        epoch(iter),max_epoch,error,acc);
-    iter = iter+1;
+    
+    % Update batch index
+    batch_idx = batch_idx+1;
 end
 total_elapsed_time = toc;
 
 % if algorithm converged before max iteration, resize results to eliminate 
 % trailing zeros
-epoch = epoch(1:iter-1);
-error_train = error_train(1:iter-1);    
-c_train = c_train(1:iter-1);
-error_test = error_test(1:iter-1);     
-c_test = c_test(1:iter-1);
-error_validation = error_validation(1:iter-1);   
-c_validation = c_validation(1:iter-1);
-a_test = a_test(1:iter-1);  a_train = a_train(1:iter-1);
-a_val = a_val(1:iter-1);
+epoch = [0 epoch(1:epoch_idx-1)];
+error_train = error_train(1:epoch_idx-1);    
+c_train = c_train(1:epoch_idx-1);
+error_test = error_test(1:epoch_idx-1);     
+c_test = c_test(1:epoch_idx-1);
+error_validation = error_validation(1:epoch_idx-1);   
+c_validation = c_validation(1:epoch_idx-1);
+a_test = [0 a_test(1:epoch_idx-1)];  a_train = [0 a_train(1:epoch_idx-1)];
+a_val = [0 a_val(1:epoch_idx-1)];
 
 % Plot data if plot_graphs = true
 if plot_graphs
@@ -263,10 +293,13 @@ if plot_graphs
     % RMS error plot
     set(gcf,'Position',[100 100 1200 450]);
     subplot(1,2,1)
-    plot(epoch,error_train,'r');hold on;
-    plot(epoch,error_test,'g');hold on;
-    plot(epoch,error_validation,'b');hold on;
-    xlim([epoch(1) epoch(end)]);
+    epoch_vec = 0:1:epoch_idx-1;
+    plot(epoch_vec(2:end),error_train,'-ro',...
+        'MarkerFaceColor','r','MarkerEdgeColor','k');hold on;
+    plot(epoch_vec(2:end),error_test,'-gs','MarkerFaceColor',...
+        'g','MarkerEdgeColor','k');hold on;
+    plot(epoch_vec(2:end),error_validation,'-b^','MarkerFaceColor',...
+        'b','MarkerEdgeColor','k');hold on;
     legend('Training','Test','Validation');
     xlabel('Epoch');
     ylabel('RMS Error');
@@ -274,10 +307,13 @@ if plot_graphs
     
     % Classification Accuracy plot
     subplot(1,2,2)
-    plot(epoch,a_train,'r');hold on;
-    plot(epoch,a_test,'g');hold on;
-    plot(epoch,a_val,'b');hold off;
-    xlim([epoch(1) epoch(end)]);
+    plot(epoch_vec,a_train,'-ro','MarkerFaceColor','r',...
+        'MarkerEdgeColor','k');hold on;
+    plot(epoch_vec,a_test,'-gs','MarkerFaceColor','g',...
+        'MarkerEdgeColor','k');hold on;
+    plot(epoch_vec,a_val,'-b^','MarkerFaceColor','b',...
+        'MarkerEdgeColor','k');hold off;
+%     xlim([epoch(1) epoch(end)]);
     legend('Training','Test','Validation','Location','Southeast');
     xlabel('Epoch');
     ylabel('Classification Accuracy [percent]');
